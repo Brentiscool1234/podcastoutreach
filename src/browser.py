@@ -29,7 +29,7 @@ except ImportError:
     WDM_AVAILABLE = False
 
 LOGIN_URL = "https://www.matchmaker.fm/login"
-BROWSE_URL = "https://www.matchmaker.fm/search"
+BROWSE_URL = "https://www.matchmaker.fm/search/shows"
 
 _driver: Optional[object] = None
 _driver_lock = threading.Lock()
@@ -469,13 +469,6 @@ def send_pitch(
     confirm_cb: Callable[[], bool],
     log_cb: Callable[[str], None],
 ) -> bool:
-    """
-    Navigate to a podcast profile page, find the pitch/apply button,
-    fill in the pitch text, then ask the user to confirm before submitting.
-
-    confirm_cb: called on the main thread to ask the user to confirm submission.
-                Should return True to submit, False to cancel.
-    """
     global _driver
     if _driver is None:
         log_cb("Browser not running.")
@@ -487,69 +480,125 @@ def send_pitch(
     try:
         log_cb(f"Navigating to podcast page: {link}")
         _driver.get(link)
-        time.sleep(2)
+        time.sleep(3)
 
-        # Step 1: find and click the Pitch / Apply / Contact button
+        # Step 1: click Send Message / Pitch / Contact button on the podcast profile
         pitch_btn = _find_element_by_selectors(_PITCH_BTN_SELECTORS)
         if pitch_btn is None:
-            # Also search by visible text
-            pitch_btn = _find_button_by_text(["pitch", "apply", "contact", "reach out", "book", "request"])
+            pitch_btn = _find_button_by_text(["send a message", "send message", "pitch", "apply", "contact", "reach out", "book", "request"])
 
         if pitch_btn:
-            log_cb("Found pitch/apply button — clicking it...")
+            log_cb("Found message button — clicking...")
             _driver.execute_script("arguments[0].scrollIntoView(true);", pitch_btn)
             time.sleep(0.5)
             pitch_btn.click()
             time.sleep(2)
-            log_cb("Pitch form opened.")
         else:
-            log_cb("Could not find a pitch button automatically. The form may already be visible, or try clicking manually in the browser.")
+            log_cb("Could not find message button — form may already be visible.")
 
-        # Step 2: find a textarea and fill in the pitch
-        textarea = _find_element_by_selectors(_PITCH_TEXTAREA_SELECTORS)
+        # Step 2: select Guest profile from the profile dropdown
+        _select_guest_profile(log_cb)
+
+        # Step 3: fill in the pitch textarea
+        textarea = None
+        wait = WebDriverWait(_driver, 8)
+        try:
+            textarea = wait.until(EC.presence_of_element_located(
+                (By.CSS_SELECTOR, "textarea")))
+        except TimeoutException:
+            textarea = _find_element_by_selectors(_PITCH_TEXTAREA_SELECTORS)
+
         if textarea:
-            log_cb("Found pitch textarea — filling in your pitch...")
+            log_cb("Filling in pitch text...")
+            _driver.execute_script("arguments[0].scrollIntoView(true);", textarea)
             textarea.clear()
-            # Type slowly to avoid bot detection
             for chunk in _chunk_text(pitch_text, 50):
                 textarea.send_keys(chunk)
-                time.sleep(0.05)
-            log_cb("Pitch text filled in.")
+                time.sleep(0.04)
+            log_cb("Pitch text filled.")
         else:
-            log_cb("Could not find a textarea automatically. Please paste your pitch manually in the browser, then confirm in the app.")
+            log_cb("WARNING: Could not find textarea — please paste pitch manually in the browser.")
 
-        # Step 3: ask user to confirm before submitting
+        # Step 4: ask user to confirm (captcha may need solving)
         should_submit = confirm_cb()
         if not should_submit:
-            log_cb("Pitch submission cancelled by user.")
+            log_cb("Pitch submission cancelled.")
             return False
 
-        # Step 4: submit
+        # Step 5: click Send / Submit
         submit_btn = _find_element_by_selectors(_SUBMIT_BTN_SELECTORS)
         if submit_btn is None:
-            submit_btn = _find_button_by_text(["submit", "send", "send pitch", "confirm", "apply"])
+            submit_btn = _find_button_by_text(["send message", "send", "submit", "confirm"])
 
         if submit_btn:
-            log_cb("Submitting pitch...")
+            log_cb("Sending pitch...")
             _driver.execute_script("arguments[0].scrollIntoView(true);", submit_btn)
             time.sleep(0.3)
             submit_btn.click()
             time.sleep(2)
-
-            # Check for success indicators
             success = _check_submission_success(log_cb)
-            if success:
-                log_cb("Pitch submitted successfully!")
-            else:
-                log_cb("Pitch submitted — check the browser to confirm. A captcha may have appeared.")
+            log_cb("Pitch sent successfully!" if success else "Pitch sent — verify in browser.")
             return True
         else:
-            log_cb("Could not find submit button. Please click Submit manually in the browser.")
+            log_cb("Could not find Send button — please click it manually in the browser.")
             return False
 
     except Exception as e:
         log_cb(f"ERROR during pitch submission: {e}")
         return False
+
+
+def _select_guest_profile(log_cb: Callable[[str], None]):
+    """Find the profile dropdown in the send-message modal and select the Guest profile."""
+    try:
+        wait = WebDriverWait(_driver, 6)
+
+        # Try native <select> first
+        try:
+            from selenium.webdriver.support.ui import Select
+            selects = _driver.find_elements(By.TAG_NAME, "select")
+            for sel in selects:
+                if sel.is_displayed():
+                    s = Select(sel)
+                    for opt in s.options:
+                        if "guest" in opt.text.lower():
+                            s.select_by_visible_text(opt.text)
+                            log_cb(f"Selected profile: {opt.text}")
+                            return
+        except Exception:
+            pass
+
+        # Try custom dropdown — click the trigger, then pick the guest option
+        dropdown_triggers = _driver.find_elements(
+            By.CSS_SELECTOR,
+            "[class*='dropdown'], [class*='select'], [class*='profile-select'], [role='combobox'], [role='listbox']"
+        )
+        for trigger in dropdown_triggers:
+            if not trigger.is_displayed():
+                continue
+            text = trigger.text.lower()
+            # Only interact with dropdowns that look profile-related
+            if any(kw in text for kw in ["profile", "guest", "host", "select", ""]):
+                try:
+                    trigger.click()
+                    time.sleep(0.8)
+                    # Look for a "guest" option in whatever appeared
+                    options = _driver.find_elements(
+                        By.CSS_SELECTOR,
+                        "[role='option'], [class*='option'], [class*='item'], li"
+                    )
+                    for opt in options:
+                        if opt.is_displayed() and "guest" in opt.text.lower():
+                            opt.click()
+                            log_cb(f"Selected profile option: {opt.text.strip()}")
+                            time.sleep(0.5)
+                            return
+                except Exception:
+                    pass
+
+        log_cb("Profile dropdown not found or already set — continuing.")
+    except Exception as e:
+        log_cb(f"Note: profile selection error ({e}) — continuing.")
 
 
 def _find_element_by_selectors(selectors: list):
