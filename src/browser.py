@@ -335,124 +335,103 @@ def search_podcasts(categories: list, log_cb: Callable[[str], None]) -> list:
         return []
     results = []
     try:
-        log_cb("Navigating to podcast search...")
-        _driver.get(BROWSE_URL)
-        time.sleep(3)
-
+        # Use URL-based category filtering — matchmaker.fm supports ?category= directly
         if categories:
-            log_cb(f"Applying category filters: {', '.join(categories)}")
-            _apply_category_filters(categories, log_cb)
-            time.sleep(2)
+            all_results = []
+            for cat in categories:
+                url = f"{BROWSE_URL}?category={urllib.request.quote(cat)}"
+                log_cb(f"Searching category: {cat}")
+                _driver.get(url)
+                time.sleep(3)
+                found = _scrape_listings(log_cb)
+                log_cb(f"  Found {len(found)} results for '{cat}'")
+                # Deduplicate by link
+                existing_links = {r["link"] for r in all_results}
+                for r in found:
+                    if r["link"] not in existing_links:
+                        all_results.append(r)
+                        existing_links.add(r["link"])
+            results = all_results
+        else:
+            log_cb("Navigating to podcast search (no category filter)...")
+            _driver.get(BROWSE_URL)
+            time.sleep(3)
+            results = _scrape_listings(log_cb)
 
-        log_cb("Scraping podcast listings...")
-        results = _scrape_listings(log_cb)
-        log_cb(f"Found {len(results)} podcasts.")
+        log_cb(f"Total unique podcasts found: {len(results)}")
     except Exception as e:
         log_cb(f"ERROR during search: {e}")
     return results
 
 
-def _apply_category_filters(categories: list, log_cb: Callable[[str], None]):
-    try:
-        filter_buttons = _driver.find_elements(
-            By.CSS_SELECTOR, "[class*='filter'], [class*='category'], [class*='tag'], [class*='genre']")
-        for btn in filter_buttons:
-            try:
-                text = btn.text.strip().lower()
-                for cat in categories:
-                    if cat.lower().split(" ")[0] in text:
-                        btn.click()
-                        log_cb(f"  Applied filter: {btn.text.strip()}")
-                        time.sleep(0.5)
-                        break
-            except Exception:
-                pass
-    except Exception as e:
-        log_cb(f"Note: Could not apply filters automatically ({e}). Apply manually in browser.")
-
-
 def _scrape_listings(log_cb: Callable[[str], None]) -> list:
+    """Scrape podcast cards from the current search results page."""
     results = []
     try:
-        card_selectors = [
-            "[class*='podcast-card']",
-            "[class*='show-card']",
-            "[class*='result-item']",
-            "[class*='podcast-item']",
-            "[class*='show-item']",
-            "article",
-            "[class*='listing']",
-            "[class*='grid-item']",
-        ]
-        cards = []
-        for sel in card_selectors:
-            cards = _driver.find_elements(By.CSS_SELECTOR, sel)
-            if len(cards) > 1:
-                break
+        wait = WebDriverWait(_driver, 8)
+        # Wait for at least one profile header to appear
+        try:
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".profile-header, .profile-avatar-wrapper")))
+        except TimeoutException:
+            log_cb("Page may still be loading or no results found.")
 
-        if not cards:
-            log_cb("Could not auto-detect podcast cards. Try scrolling in the browser.")
-            return []
-
-        for card in cards[:50]:
+        # Each podcast card is a clickable block containing a profile-header
+        # Find all links that go to /show/ pages
+        show_links = _driver.find_elements(By.CSS_SELECTOR, "a[href*='/show/']")
+        seen = set()
+        for anchor in show_links:
             try:
+                href = anchor.get_attribute("href") or ""
+                if not href or href in seen:
+                    continue
+                seen.add(href)
+
+                # Get the card container (parent elements)
+                card = anchor
+                for _ in range(5):
+                    try:
+                        card = card.find_element(By.XPATH, "..")
+                        # Stop if card contains a profile-header
+                        if card.find_elements(By.CSS_SELECTOR, ".profile-header, h1, h2, h3"):
+                            break
+                    except Exception:
+                        break
+
                 name = ""
-                desc = ""
-                link = ""
-                category = ""
-
-                for name_sel in ["h2", "h3", "h4", "[class*='title']", "[class*='name']", "[class*='podcast-name']"]:
-                    try:
-                        name = card.find_element(By.CSS_SELECTOR, name_sel).text.strip()
-                        if name:
-                            break
-                    except Exception:
-                        pass
-
-                for desc_sel in ["p", "[class*='description']", "[class*='desc']", "[class*='bio']", "[class*='subtitle']"]:
-                    try:
-                        desc = card.find_element(By.CSS_SELECTOR, desc_sel).text.strip()
-                        if desc:
-                            break
-                    except Exception:
-                        pass
-
-                for cat_sel in ["[class*='category']", "[class*='genre']", "[class*='tag']"]:
-                    try:
-                        category = card.find_element(By.CSS_SELECTOR, cat_sel).text.strip()
-                        if category:
-                            break
-                    except Exception:
-                        pass
-
                 try:
-                    link = card.find_element(By.TAG_NAME, "a").get_attribute("href") or ""
+                    name = card.find_element(By.CSS_SELECTOR, ".profile-header, h1, h2, h3, h4").text.strip()
+                except Exception:
+                    name = anchor.text.strip()
+
+                desc = ""
+                try:
+                    desc = card.find_element(By.CSS_SELECTOR, "p, .text-accent").text.strip()
                 except Exception:
                     pass
 
-                # Try to find a host name separate from the podcast name
-                host_name = ""
-                for host_sel in ["[class*='host']", "[class*='author']", "[class*='presenter']", "[class*='by']"]:
-                    try:
-                        host_name = card.find_element(By.CSS_SELECTOR, host_sel).text.strip()
-                        if host_name:
-                            break
-                    except Exception:
-                        pass
+                # Categories from profile-pill links
+                category = ""
+                try:
+                    pills = card.find_elements(By.CSS_SELECTOR, ".profile-pill")
+                    category = ", ".join(p.text.strip() for p in pills[:3] if p.text.strip())
+                except Exception:
+                    pass
 
                 if name:
                     results.append({
                         "name": name,
-                        "host_name": host_name or name,
+                        "host_name": name,
                         "description": desc[:200],
                         "category": category,
-                        "link": link,
+                        "link": href,
                         "card_index": len(results),
                     })
+                if len(results) >= 50:
+                    break
             except Exception:
                 pass
     except Exception as e:
-        log_cb(f"Note: Scraping error: {e}")
+        log_cb(f"Scraping error: {e}")
     return results
 
 
@@ -482,8 +461,12 @@ def send_pitch(
         _driver.get(link)
         time.sleep(3)
 
-        # Step 1: click Send Message / Pitch / Contact button on the podcast profile
-        pitch_btn = _find_element_by_selectors(_PITCH_BTN_SELECTORS)
+        # Step 1: click Send Message button on the podcast profile
+        # Try the known data-trigger attribute first (confirmed from matchmaker.fm DOM)
+        pitch_btn = _find_element_by_selectors([
+            "button[data-trigger='show-profile-message-send-intent']",
+            *_PITCH_BTN_SELECTORS,
+        ])
         if pitch_btn is None:
             pitch_btn = _find_button_by_text(["send a message", "send message", "pitch", "apply", "contact", "reach out", "book", "request"])
 
@@ -554,10 +537,9 @@ def _select_guest_profile(log_cb: Callable[[str], None]):
     try:
         wait = WebDriverWait(_driver, 8)
 
-        # The dropdown control has role="combobox" on its input (react-select pattern)
-        # Click the control container to open the dropdown menu
+        # The dropdown control — try the exact class first, then the generic react-select pattern
         control = wait.until(EC.presence_of_element_located(
-            (By.CSS_SELECTOR, "[class*='-control']")))
+            (By.CSS_SELECTOR, ".css-1sq9woi-control, [class*='-control']")))
         control.click()
         time.sleep(0.8)
 
