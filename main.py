@@ -453,22 +453,11 @@ class App(ctk.CTk):
             messagebox.showwarning("No Link", f"No profile link found for '{pod['name']}'. Open their page manually.")
             return
 
-        confirmed = messagebox.askyesno(
-            "Confirm Pitch Submission",
-            f"Send your pitch to:\n\n{pod['name']}\n\nThe app will:\n"
-            "1. Navigate to their podcast page\n"
-            "2. Click the Pitch/Apply button\n"
-            "3. Fill in your pitch text\n"
-            "4. Ask you to confirm before clicking Submit\n\n"
-            "Proceed?",
-        )
-        if not confirmed:
-            return
-
         self.browser_status.configure(text="Browser: Sending pitch...", text_color="yellow")
         self._log(f"Starting pitch send to: {pod['name']}")
 
-        # confirm_cb runs on the background thread but must show dialog on main thread
+        # Single approval: shown after the form is filled so the user can
+        # check the form and solve any captcha before confirming submission.
         confirm_event = threading.Event()
         confirm_result = [False]
 
@@ -479,11 +468,9 @@ class App(ctk.CTk):
 
         def _ask_confirm():
             result = messagebox.askyesno(
-                "Ready to Submit?",
-                "The pitch has been filled in.\n\n"
-                "• If a captcha appeared in the browser, solve it first.\n"
-                "• Check the form looks correct.\n\n"
-                "Click YES to submit, NO to cancel.",
+                "Submit Pitch?",
+                f"Pitch filled in for: {pod['name']}\n\n"
+                "Solve any captcha in the browser if needed, then click YES to submit.",
             )
             confirm_result[0] = result
             confirm_event.set()
