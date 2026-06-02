@@ -259,13 +259,19 @@ def launch_browser(log_cb: Callable[[str], None]) -> bool:
         _launching = True
         try:
             driver = _try_launch(log_cb)
-            if driver:
-                _driver = driver
+            if not driver:
+                log_cb("ERROR: Browser failed to launch. Check the log for details.")
+                return False
+            # Save driver immediately so the browser isn't orphaned if navigation fails
+            _driver = driver
+            time.sleep(1)
+            try:
+                log_cb(f"Navigating to {LOGIN_URL} ...")
                 _driver.get(LOGIN_URL)
                 log_cb("Browser ready. Please log in. Solve any captcha manually.")
-                return True
-            log_cb("ERROR: Browser failed to launch. Check the log for details.")
-            return False
+            except Exception as e:
+                log_cb(f"Navigation error (browser is still open): {e}")
+            return True
         finally:
             _launching = False
 
