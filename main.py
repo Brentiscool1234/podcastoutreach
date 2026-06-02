@@ -203,21 +203,46 @@ class App(ctk.CTk):
             cb = ctk.CTkCheckBox(filter_frame, text=cat, variable=var)
             cb.grid(row=i + 1, column=0, sticky="w", padx=12, pady=2)
 
-        ctk.CTkButton(filter_frame, text="Search Podcasts", command=self._search_podcasts).grid(
-            row=len(CATEGORIES) + 1, column=0, padx=12, pady=(8, 12), sticky="ew")
-
         # Results list
         results_frame = ctk.CTkFrame(frame)
         results_frame.grid(row=2, column=1, columnspan=2, sticky="nsew", padx=(0, 0), pady=(0, 8))
         results_frame.grid_columnconfigure(0, weight=1)
-        results_frame.grid_rowconfigure(1, weight=1)
+        results_frame.grid_rowconfigure(3, weight=1)
 
         ctk.CTkLabel(results_frame, text="Podcast Results", font=ctk.CTkFont(weight="bold")).grid(
             row=0, column=0, padx=12, pady=(10, 4), sticky="w")
 
+        # Row A — Search controls
+        row_a = ctk.CTkFrame(results_frame, fg_color="transparent")
+        row_a.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 4))
+        ctk.CTkLabel(row_a, text="Max podcasts:").pack(side="left", padx=(0, 4))
+        self.e_max_podcasts = ctk.CTkEntry(row_a, width=60)
+        self.e_max_podcasts.insert(0, "20")
+        self.e_max_podcasts.pack(side="left", padx=(0, 8))
+        ctk.CTkButton(row_a, text="Search Podcasts", command=self._search_podcasts).pack(side="left")
+
+        # Row B — Mode and auto-outreach
+        row_b = ctk.CTkFrame(results_frame, fg_color="transparent")
+        row_b.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 4))
+        ctk.CTkLabel(row_b, text="Mode:").pack(side="left", padx=(0, 4))
+        self.v_mode = ctk.StringVar(value="manual")
+        ctk.CTkRadioButton(row_b, text="Manual", value="manual", variable=self.v_mode).pack(side="left", padx=(0, 8))
+        ctk.CTkRadioButton(row_b, text="Automated", value="automated", variable=self.v_mode).pack(side="left", padx=(0, 12))
+        self.btn_auto_outreach = ctk.CTkButton(
+            row_b, text="▶ Start Auto Outreach",
+            fg_color="#1e8449", hover_color="#145a32",
+            command=self._start_auto_outreach,
+        )
+        self.btn_auto_outreach.pack(side="left")
+
+        # Row C — Progress label
+        self.lbl_outreach_progress = ctk.CTkLabel(results_frame, text="", text_color="gray")
+        self.lbl_outreach_progress.grid(row=3, column=0, sticky="w", padx=12, pady=(0, 2))
+
         self.results_box = ctk.CTkScrollableFrame(results_frame)
-        self.results_box.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        self.results_box.grid(row=4, column=0, sticky="nsew", padx=8, pady=(0, 8))
         self.results_box.grid_columnconfigure(0, weight=1)
+        results_frame.grid_rowconfigure(4, weight=1)
 
         self._podcast_rows = []
 
@@ -401,13 +426,17 @@ class App(ctk.CTk):
 
     def _search_podcasts(self):
         selected = [cat for cat, var in self.category_vars.items() if var.get()]
-        self._log(f"Searching podcasts (categories: {selected or 'All'})...")
+        try:
+            max_r = int(self.e_max_podcasts.get().strip())
+        except Exception:
+            max_r = 20
+        self._log(f"Searching podcasts — max {max_r} results (categories: {selected or 'All'})...")
         self.browser_status.configure(text="Browser: Searching...", text_color="yellow")
 
         def run():
-            results = browser.search_podcasts(selected, lambda msg: self.after(0, lambda m=msg: self._log(m)))
+            results = browser.search_podcasts(selected, lambda msg: self.after(0, lambda m=msg: self._log(m)), max_results=max_r)
             self.after(0, lambda: self._display_results(results))
-            self.after(0, lambda: self.browser_status.configure(text="Browser: Running", text_color="green"))
+            self.after(0, lambda: self.browser_status.configure(text=f"Browser: Found {len(results)} podcasts", text_color="green"))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -468,35 +497,36 @@ class App(ctk.CTk):
             messagebox.showwarning("No Pitch", "Go to the Pitch Creator tab and generate or write a pitch first.")
             return
         if not pod.get("link"):
-            messagebox.showwarning("No Link", f"No profile link found for '{pod['name']}'. Open their page manually.")
+            messagebox.showwarning("No Link", f"No profile link found for '{pod['name']}'.")
             return
 
-        # Replace common host name placeholders with the podcast/host name
         host_name = pod.get("host_name") or pod.get("name", "")
         for placeholder in ["[Host's Name]", "[Host Name]", "[host's name]", "[host name]", "[Podcast Host]"]:
             pitch_text = pitch_text.replace(placeholder, host_name)
 
-        self.browser_status.configure(text="Browser: Sending pitch...", text_color="yellow")
-        self._log(f"Starting pitch send to: {pod['name']} (host name filled: {host_name})")
+        mode = self.v_mode.get()
 
-        # Single approval: shown after the form is filled so the user can
-        # check the form and solve any captcha before confirming submission.
-        confirm_event = threading.Event()
-        confirm_result = [False]
+        if mode == "automated":
+            confirm_cb = None  # no dialog in automated mode
+        else:
+            confirm_event = threading.Event()
+            confirm_result = [False]
 
-        def confirm_cb():
-            self.after(0, _ask_confirm)
-            confirm_event.wait(timeout=120)
-            return confirm_result[0]
+            def confirm_cb():
+                self.after(0, _ask_confirm)
+                confirm_event.wait(timeout=120)
+                return confirm_result[0]
 
-        def _ask_confirm():
-            result = messagebox.askyesno(
-                "Submit Pitch?",
-                f"Pitch filled in for: {pod['name']}\n\n"
-                "Solve any captcha in the browser if needed, then click YES to submit.",
-            )
-            confirm_result[0] = result
-            confirm_event.set()
+            def _ask_confirm():
+                result = messagebox.askyesno(
+                    "Submit Pitch?",
+                    f"Pitch filled in for: {pod['name']}\n\nSolve any captcha if needed, then click YES to submit.",
+                )
+                confirm_result[0] = result
+                confirm_event.set()
+
+        self.browser_status.configure(text=f"Browser: Sending to {pod['name']}...", text_color="yellow")
+        self._log(f"Sending pitch to: {pod['name']}")
 
         def run():
             ok = browser.send_pitch(
@@ -505,11 +535,73 @@ class App(ctk.CTk):
                 confirm_cb=confirm_cb,
                 log_cb=lambda msg: self.after(0, lambda m=msg: self._log(m)),
             )
-            status = "Browser: Running" if ok else "Browser: Running (pitch not sent)"
+            status = "Browser: Running" if ok else "Browser: Running (not sent)"
             color = "green" if ok else "orange"
             self.after(0, lambda: self.browser_status.configure(text=status, text_color=color))
-            if ok:
-                self.after(0, lambda: self._log(f"Pitch sent to {pod['name']} successfully."))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _start_auto_outreach(self):
+        pitch_text = self.t_pitch.get("0.0", "end").strip()
+        if not pitch_text:
+            messagebox.showwarning("No Pitch", "Generate or write a pitch in the Pitch Creator tab first.")
+            return
+        if browser.get_driver() is None:
+            messagebox.showwarning("Browser", "Launch the browser and log in first.")
+            return
+
+        selected = [cat for cat, var in self.category_vars.items() if var.get()]
+        try:
+            max_r = int(self.e_max_podcasts.get().strip())
+        except Exception:
+            max_r = 20
+
+        if not messagebox.askyesno("Start Auto Outreach?",
+            f"This will automatically send your pitch to up to {max_r} podcasts "
+            f"({', '.join(selected) if selected else 'all categories'}).\n\n"
+            "No individual confirmation will be shown per pitch.\n\nProceed?"):
+            return
+
+        self.btn_auto_outreach.configure(state="disabled", text="Running...")
+        self.lbl_outreach_progress.configure(text="Gathering podcasts...", text_color="yellow")
+        self._log(f"Auto outreach started — max {max_r} podcasts, categories: {selected or 'All'}")
+
+        def run():
+            log = lambda msg: self.after(0, lambda m=msg: self._log(m))
+
+            # Step 1: gather podcasts
+            results = browser.search_podcasts(selected, log, max_results=max_r)
+            self.after(0, lambda: self._display_results(results))
+            self.after(0, lambda: self.lbl_outreach_progress.configure(
+                text=f"Found {len(results)} podcasts. Sending pitches...", text_color="yellow"))
+            log(f"Gathered {len(results)} podcasts. Starting sends...")
+
+            # Step 2: send to each
+            sent = 0
+            for i, pod in enumerate(results):
+                if browser.get_driver() is None:
+                    log("Browser closed — stopping auto outreach.")
+                    break
+
+                pt = pitch_text
+                host_name = pod.get("host_name") or pod.get("name", "")
+                for ph in ["[Host's Name]", "[Host Name]", "[host's name]", "[host name]", "[Podcast Host]"]:
+                    pt = pt.replace(ph, host_name)
+
+                prog_txt = f"Sending {i+1}/{len(results)}: {pod['name']}"
+                self.after(0, lambda t=prog_txt: self.lbl_outreach_progress.configure(text=t, text_color="yellow"))
+                log(prog_txt)
+
+                ok = browser.send_pitch(link=pod["link"], pitch_text=pt, confirm_cb=None, log_cb=log)
+                if ok:
+                    sent += 1
+                # Small delay between pitches to be polite
+                import time; time.sleep(2)
+
+            final = f"Auto outreach complete: {sent}/{len(results)} pitches sent."
+            self.after(0, lambda: self.lbl_outreach_progress.configure(text=final, text_color="green"))
+            self.after(0, lambda: self.btn_auto_outreach.configure(state="normal", text="▶ Start Auto Outreach"))
+            log(final)
 
         threading.Thread(target=run, daemon=True).start()
 

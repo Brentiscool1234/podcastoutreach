@@ -328,106 +328,161 @@ def check_login_status(log_cb: Callable[[str], None]) -> bool:
         return False
 
 
-def search_podcasts(categories: list, log_cb: Callable[[str], None]) -> list:
+def search_podcasts(categories: list, log_cb: Callable[[str], None], max_results: int = 50) -> list:
     global _driver
     if _driver is None:
         log_cb("Browser not running.")
         return []
-    results = []
+    all_results = []
     try:
-        # Use URL-based category filtering — matchmaker.fm supports ?category= directly
-        if categories:
-            all_results = []
-            for cat in categories:
-                url = f"{BROWSE_URL}?category={urllib.request.quote(cat)}"
-                log_cb(f"Searching category: {cat}")
-                _driver.get(url)
-                time.sleep(3)
-                found = _scrape_listings(log_cb)
-                log_cb(f"  Found {len(found)} results for '{cat}'")
-                # Deduplicate by link
+        def _paginate_and_scrape(start_url: str):
+            _driver.get(start_url)
+            time.sleep(3)
+            while True:
+                found = _scrape_listings(log_cb, max_per_page=max_results)
                 existing_links = {r["link"] for r in all_results}
                 for r in found:
                     if r["link"] not in existing_links:
                         all_results.append(r)
                         existing_links.add(r["link"])
-            results = all_results
+                if len(all_results) >= max_results:
+                    break
+                # Look for next page
+                next_btn = None
+                for sel in [
+                    "a[aria-label='Next page']",
+                    "a[rel='next']",
+                    "li.next a",
+                    ".pagination li:last-child a",
+                    "button[aria-label*='next' i]",
+                ]:
+                    try:
+                        els = _driver.find_elements(By.CSS_SELECTOR, sel)
+                        for el in els:
+                            if el.is_displayed() and el.is_enabled():
+                                next_btn = el
+                                break
+                        if next_btn:
+                            break
+                    except Exception:
+                        pass
+                if next_btn:
+                    try:
+                        next_btn.click()
+                        time.sleep(3)
+                    except Exception:
+                        break
+                else:
+                    break
+
+        if categories:
+            for cat in categories:
+                url = f"{BROWSE_URL}?category={urllib.request.quote(cat)}"
+                log_cb(f"Searching category: {cat}")
+                _paginate_and_scrape(url)
+                log_cb(f"  Total so far: {len(all_results)}")
+                if len(all_results) >= max_results:
+                    break
         else:
             log_cb("Navigating to podcast search (no category filter)...")
-            _driver.get(BROWSE_URL)
-            time.sleep(3)
-            results = _scrape_listings(log_cb)
+            _paginate_and_scrape(BROWSE_URL)
 
-        log_cb(f"Total unique podcasts found: {len(results)}")
+        all_results = all_results[:max_results]
+        log_cb(f"Total unique podcasts found: {len(all_results)}")
     except Exception as e:
         log_cb(f"ERROR during search: {e}")
-    return results
+    return all_results
 
 
-def _scrape_listings(log_cb: Callable[[str], None]) -> list:
+_NAV_NOISE = {"find a show", "browse", "search", "podcast", "matchmaker"}
+
+
+def _scrape_listings(log_cb: Callable[[str], None], max_per_page: int = 50) -> list:
     """Scrape podcast cards from the current search results page."""
     results = []
     try:
         wait = WebDriverWait(_driver, 8)
-        # Wait for at least one profile header to appear
         try:
-            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".profile-header, .profile-avatar-wrapper")))
+            wait.until(EC.any_of(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "a[data-trigger='find-shows-profile']")),
+                EC.presence_of_element_located((By.CSS_SELECTOR, ".profile-avatar-wrapper")),
+            ))
         except TimeoutException:
             log_cb("Page may still be loading or no results found.")
 
-        # Each podcast card is a clickable block containing a profile-header
-        # Find all links that go to /show/ pages
-        show_links = _driver.find_elements(By.CSS_SELECTOR, "a[href*='/show/']")
+        # Primary: cards with the specific data-trigger attribute
+        cards = _driver.find_elements(By.CSS_SELECTOR, "a[data-trigger='find-shows-profile'][href*='/show/']")
+        # Fallback: any anchor linking to /show/
+        if not cards:
+            cards = _driver.find_elements(By.CSS_SELECTOR, "a[href*='/show/']")
+
         seen = set()
-        for anchor in show_links:
+        for card in cards:
+            if len(results) >= max_per_page:
+                break
             try:
-                href = anchor.get_attribute("href") or ""
+                href = card.get_attribute("href") or ""
                 if not href or href in seen:
                     continue
                 seen.add(href)
 
-                # Get the card container (parent elements)
-                card = anchor
-                for _ in range(5):
+                # Extract name — try selectors inside the card anchor
+                name = ""
+                for sel in [
+                    ".profile-header", "h2", "h3", "h1", "h4",
+                    "[class*='Header']", "[class*='title']", "[class*='name']",
+                ]:
                     try:
-                        card = card.find_element(By.XPATH, "..")
-                        # Stop if card contains a profile-header
-                        if card.find_elements(By.CSS_SELECTOR, ".profile-header, h1, h2, h3"):
+                        el = card.find_element(By.CSS_SELECTOR, sel)
+                        t = el.text.strip()
+                        if t:
+                            name = t
                             break
                     except Exception:
-                        break
+                        pass
 
-                name = ""
-                try:
-                    name = card.find_element(By.CSS_SELECTOR, ".profile-header, h1, h2, h3, h4").text.strip()
-                except Exception:
-                    name = anchor.text.strip()
+                if not name:
+                    # Fallback: first non-empty non-noise line of card text
+                    for line in card.text.splitlines():
+                        line = line.strip()
+                        if line and line.lower() not in _NAV_NOISE:
+                            name = line
+                            break
 
+                if not name:
+                    continue
+
+                # Description
                 desc = ""
-                try:
-                    desc = card.find_element(By.CSS_SELECTOR, "p, .text-accent").text.strip()
-                except Exception:
-                    pass
+                for sel in [".profile-card__pitch", "[class*='pitch']", "p"]:
+                    try:
+                        el = card.find_element(By.CSS_SELECTOR, sel)
+                        t = el.text.strip()
+                        if t:
+                            desc = t[:200]
+                            break
+                    except Exception:
+                        pass
 
-                # Categories from profile-pill links
+                # Category
                 category = ""
                 try:
-                    pills = card.find_elements(By.CSS_SELECTOR, ".profile-pill")
-                    category = ", ".join(p.text.strip() for p in pills[:3] if p.text.strip())
+                    for sel in [".profile-pill", "[class*='pill']", "[class*='categor']"]:
+                        pills = card.find_elements(By.CSS_SELECTOR, sel)
+                        if pills:
+                            category = ", ".join(p.text.strip() for p in pills[:3] if p.text.strip())
+                            break
                 except Exception:
                     pass
 
-                if name:
-                    results.append({
-                        "name": name,
-                        "host_name": name,
-                        "description": desc[:200],
-                        "category": category,
-                        "link": href,
-                        "card_index": len(results),
-                    })
-                if len(results) >= 50:
-                    break
+                results.append({
+                    "name": name,
+                    "host_name": name,
+                    "description": desc,
+                    "category": category,
+                    "link": href,
+                    "card_index": len(results),
+                })
             except Exception:
                 pass
     except Exception as e:
@@ -503,8 +558,12 @@ def send_pitch(
         else:
             log_cb("WARNING: Could not find textarea — please paste pitch manually in the browser.")
 
-        # Step 4: ask user to confirm (captcha may need solving)
-        should_submit = confirm_cb()
+        # Step 4: ask user to confirm (captcha may need solving) — skip in automated mode
+        if confirm_cb is not None:
+            should_submit = confirm_cb()
+        else:
+            should_submit = True
+
         if not should_submit:
             log_cb("Pitch submission cancelled.")
             return False
