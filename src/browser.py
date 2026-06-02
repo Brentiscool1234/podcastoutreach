@@ -496,21 +496,22 @@ def send_pitch(
         else:
             log_cb("Could not find message button — form may already be visible.")
 
-        # Step 2: select Guest profile from the profile dropdown
+        # Step 2: select Guest profile from the react-select dropdown
         _select_guest_profile(log_cb)
 
-        # Step 3: fill in the pitch textarea
-        textarea = None
-        wait = WebDriverWait(_driver, 8)
+        # Step 3: wait for textarea to become enabled (it's disabled until profile selected)
+        log_cb("Waiting for message textarea to become active...")
+        wait = WebDriverWait(_driver, 10)
         try:
-            textarea = wait.until(EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "textarea")))
+            textarea = wait.until(EC.element_to_be_clickable((By.ID, "message")))
         except TimeoutException:
             textarea = _find_element_by_selectors(_PITCH_TEXTAREA_SELECTORS)
 
         if textarea:
             log_cb("Filling in pitch text...")
             _driver.execute_script("arguments[0].scrollIntoView(true);", textarea)
+            _driver.execute_script("arguments[0].removeAttribute('disabled');", textarea)
+            textarea.click()
             textarea.clear()
             for chunk in _chunk_text(pitch_text, 50):
                 textarea.send_keys(chunk)
@@ -525,10 +526,10 @@ def send_pitch(
             log_cb("Pitch submission cancelled.")
             return False
 
-        # Step 5: click Send / Submit
-        submit_btn = _find_element_by_selectors(_SUBMIT_BTN_SELECTORS)
+        # Step 5: click the Send button (exact text from modal)
+        submit_btn = _find_button_by_text(["send"])
         if submit_btn is None:
-            submit_btn = _find_button_by_text(["send message", "send", "submit", "confirm"])
+            submit_btn = _find_element_by_selectors(_SUBMIT_BTN_SELECTORS)
 
         if submit_btn:
             log_cb("Sending pitch...")
@@ -549,56 +550,46 @@ def send_pitch(
 
 
 def _select_guest_profile(log_cb: Callable[[str], None]):
-    """Find the profile dropdown in the send-message modal and select the Guest profile."""
+    """Select the Guest profile from the react-select dropdown in the send-message modal."""
     try:
-        wait = WebDriverWait(_driver, 6)
+        wait = WebDriverWait(_driver, 8)
 
-        # Try native <select> first
+        # The dropdown control has role="combobox" on its input (react-select pattern)
+        # Click the control container to open the dropdown menu
+        control = wait.until(EC.presence_of_element_located(
+            (By.CSS_SELECTOR, "[class*='-control']")))
+        control.click()
+        time.sleep(0.8)
+
+        # react-select renders options into a menu with role="option"
+        options = _driver.find_elements(By.CSS_SELECTOR, "[class*='-option'], [role='option']")
+        for opt in options:
+            try:
+                if opt.is_displayed() and "guest" in opt.text.lower():
+                    opt.click()
+                    log_cb(f"Selected profile: {opt.text.strip()}")
+                    time.sleep(0.5)
+                    return
+            except Exception:
+                pass
+
+        # Fallback: type "guest" into the react-select input to filter, then pick first result
         try:
-            from selenium.webdriver.support.ui import Select
-            selects = _driver.find_elements(By.TAG_NAME, "select")
-            for sel in selects:
-                if sel.is_displayed():
-                    s = Select(sel)
-                    for opt in s.options:
-                        if "guest" in opt.text.lower():
-                            s.select_by_visible_text(opt.text)
-                            log_cb(f"Selected profile: {opt.text}")
-                            return
+            rs_input = _driver.find_element(By.CSS_SELECTOR, "input[role='combobox']")
+            rs_input.send_keys("guest")
+            time.sleep(0.8)
+            options = _driver.find_elements(By.CSS_SELECTOR, "[class*='-option'], [role='option']")
+            if options:
+                options[0].click()
+                log_cb(f"Selected profile via search: {options[0].text.strip()}")
+                time.sleep(0.5)
+                return
         except Exception:
             pass
 
-        # Try custom dropdown — click the trigger, then pick the guest option
-        dropdown_triggers = _driver.find_elements(
-            By.CSS_SELECTOR,
-            "[class*='dropdown'], [class*='select'], [class*='profile-select'], [role='combobox'], [role='listbox']"
-        )
-        for trigger in dropdown_triggers:
-            if not trigger.is_displayed():
-                continue
-            text = trigger.text.lower()
-            # Only interact with dropdowns that look profile-related
-            if any(kw in text for kw in ["profile", "guest", "host", "select", ""]):
-                try:
-                    trigger.click()
-                    time.sleep(0.8)
-                    # Look for a "guest" option in whatever appeared
-                    options = _driver.find_elements(
-                        By.CSS_SELECTOR,
-                        "[role='option'], [class*='option'], [class*='item'], li"
-                    )
-                    for opt in options:
-                        if opt.is_displayed() and "guest" in opt.text.lower():
-                            opt.click()
-                            log_cb(f"Selected profile option: {opt.text.strip()}")
-                            time.sleep(0.5)
-                            return
-                except Exception:
-                    pass
-
-        log_cb("Profile dropdown not found or already set — continuing.")
+        log_cb("Could not auto-select guest profile — please select it manually in the browser.")
     except Exception as e:
-        log_cb(f"Note: profile selection error ({e}) — continuing.")
+        log_cb(f"Profile selection error ({e}) — please select manually.")
 
 
 def _find_element_by_selectors(selectors: list):
