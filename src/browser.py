@@ -568,8 +568,24 @@ def send_pitch(
             log_cb("Pitch submission cancelled.")
             return False
 
-        # Step 5: click the Send button (exact text from modal)
-        submit_btn = _find_button_by_text(["send"])
+        # Step 5: click the Send button inside the modal (not the outer "Send a Message" button)
+        submit_btn = None
+        try:
+            modal = _driver.find_element(By.CSS_SELECTOR, ".ReactModal__Content")
+            btns = modal.find_elements(By.CSS_SELECTOR, "button")
+            for b in btns:
+                if b.is_displayed() and b.text.strip().lower() == "send":
+                    submit_btn = b
+                    break
+            if submit_btn is None:
+                # fallback: any visible button in modal (not the cancel/close one)
+                for b in btns:
+                    if b.is_displayed() and b.text.strip().lower() not in ("", "cancel", "close", "×", "x"):
+                        submit_btn = b
+                        break
+        except Exception:
+            pass
+
         if submit_btn is None:
             submit_btn = _find_element_by_selectors(_SUBMIT_BTN_SELECTORS)
 
