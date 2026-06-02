@@ -177,11 +177,16 @@ class App(ctk.CTk):
         # Browser controls
         browser_frame = ctk.CTkFrame(frame)
         browser_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 12), padx=0)
-        ctk.CTkButton(browser_frame, text="Launch Browser", width=140, command=self._launch_browser).grid(row=0, column=0, padx=8, pady=8)
-        ctk.CTkButton(browser_frame, text="Fill Login & Submit", width=160, command=self._fill_login).grid(row=0, column=1, padx=4, pady=8)
-        ctk.CTkButton(browser_frame, text="Check Login Status", width=160, command=self._check_login).grid(row=0, column=2, padx=4, pady=8)
-        ctk.CTkButton(browser_frame, text="Close Browser", width=120, fg_color="#c0392b", hover_color="#922b21",
-                      command=self._close_browser).grid(row=0, column=3, padx=(4, 8), pady=8)
+        btn_launch = ctk.CTkButton(browser_frame, text="Launch Browser", width=140, command=self._launch_browser)
+        btn_launch.grid(row=0, column=0, padx=8, pady=8)
+        btn_fill = ctk.CTkButton(browser_frame, text="Fill Login & Submit", width=160, command=self._fill_login)
+        btn_fill.grid(row=0, column=1, padx=4, pady=8)
+        btn_check = ctk.CTkButton(browser_frame, text="Check Login Status", width=160, command=self._check_login)
+        btn_check.grid(row=0, column=2, padx=4, pady=8)
+        btn_close = ctk.CTkButton(browser_frame, text="Close Browser", width=120, fg_color="#c0392b", hover_color="#922b21",
+                      command=self._close_browser)
+        btn_close.grid(row=0, column=3, padx=(4, 8), pady=8)
+        self._browser_btns = [btn_launch, btn_fill, btn_check, btn_close]
         self.browser_status = ctk.CTkLabel(browser_frame, text="Browser: Not running", text_color="gray")
         self.browser_status.grid(row=0, column=4, padx=8)
 
@@ -351,16 +356,29 @@ class App(ctk.CTk):
     # ─── Browser actions ───────────────────────────────────────────────────────
 
     def _launch_browser(self):
-        self.browser_status.configure(text="Browser: Launching...", text_color="yellow")
-        self._log("Launching browser...")
+        if browser.is_launching():
+            self._log("Browser is still starting up — please wait.")
+            return
+        self.browser_status.configure(text="Browser: Starting... (this can take 30s)", text_color="yellow")
+        self._log("Launching browser — please wait, do not click other browser buttons...")
+        self._set_browser_buttons(False)
 
         def run():
             ok = browser.launch_browser(lambda msg: self.after(0, lambda m=msg: self._log(m)))
-            status = "Browser: Running — log in and solve captcha if needed" if ok else "Browser: Failed to launch"
+            status = "Browser: Ready — log in and solve captcha if needed" if ok else "Browser: Failed — see Activity Log"
             color = "green" if ok else "red"
             self.after(0, lambda: self.browser_status.configure(text=status, text_color=color))
+            self.after(0, lambda: self._set_browser_buttons(True))
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _set_browser_buttons(self, enabled: bool):
+        state = "normal" if enabled else "disabled"
+        for btn in getattr(self, "_browser_btns", []):
+            try:
+                btn.configure(state=state)
+            except Exception:
+                pass
 
     def _fill_login(self):
         email = self.e_mm_email.get().strip()

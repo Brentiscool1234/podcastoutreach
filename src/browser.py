@@ -29,6 +29,7 @@ BROWSE_URL = "https://www.matchmaker.fm/search"
 
 _driver: Optional[object] = None
 _driver_lock = threading.Lock()
+_launching = False  # True while browser is starting up
 
 # Selectors for matchmaker.fm — these cover the most common patterns seen in
 # podcast marketplace sites; update if the site changes its class names.
@@ -69,19 +70,69 @@ def is_available() -> bool:
     return SELENIUM_AVAILABLE
 
 
+def is_launching() -> bool:
+    return _launching
+
+
+def _get_chrome_major_version() -> Optional[int]:
+    """Read installed Chrome major version from the Windows registry."""
+    import re
+    # Method 1: Windows registry (most reliable)
+    try:
+        import winreg
+        for key_path in [
+            r"SOFTWARE\Google\Chrome\BLBeacon",
+            r"SOFTWARE\Wow6432Node\Google\Chrome\BLBeacon",
+        ]:
+            try:
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path)
+                version, _ = winreg.QueryValueEx(key, "version")
+                winreg.CloseKey(key)
+                major = int(version.split(".")[0])
+                return major
+            except Exception:
+                pass
+    except ImportError:
+        pass
+
+    # Method 2: read version file Chrome installs alongside the exe
+    import os, glob
+    chrome_dirs = [
+        r"C:\Program Files\Google\Chrome\Application",
+        r"C:\Program Files (x86)\Google\Chrome\Application",
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application"),
+    ]
+    for d in chrome_dirs:
+        try:
+            # Chrome's version folder is named after the version, e.g. "124.0.6367.82"
+            versions = [f for f in os.listdir(d) if re.match(r"\d+\.\d+\.\d+\.\d+", f)]
+            if versions:
+                return int(versions[0].split(".")[0])
+        except Exception:
+            pass
+
+    return None  # uc will try to auto-detect
+
+
 def _try_launch(log_cb: Callable[[str], None]):
     """Try undetected_chromedriver first, fall back to selenium + webdriver-manager."""
-    # Attempt 1: undetected_chromedriver (best for avoiding bot detection)
+    version = _get_chrome_major_version()
+    if version:
+        log_cb(f"Detected Chrome version: {version}")
+    else:
+        log_cb("Could not detect Chrome version — will attempt auto-detect.")
+
+    # Attempt 1: undetected_chromedriver with explicit version
     try:
         log_cb("Launching Chrome (undetected mode)...")
         options = uc.ChromeOptions()
         options.add_argument("--start-maximized")
-        driver = uc.Chrome(options=options, version_main=_get_chrome_major_version())
+        driver = uc.Chrome(options=options, version_main=version)
         return driver
     except Exception as e:
-        log_cb(f"Undetected driver failed ({e}), trying standard driver...")
+        log_cb(f"Undetected driver failed: {type(e).__name__}. Trying standard driver...")
 
-    # Attempt 2: standard selenium + webdriver-manager (auto-downloads matching driver)
+    # Attempt 2: selenium + webdriver-manager (downloads exact matching chromedriver)
     if WDM_AVAILABLE:
         try:
             log_cb("Launching Chrome (standard mode)...")
@@ -94,32 +145,10 @@ def _try_launch(log_cb: Callable[[str], None]):
             driver = webdriver.Chrome(service=service, options=options)
             return driver
         except Exception as e:
-            log_cb(f"Standard driver also failed: {e}")
+            log_cb(f"Standard driver failed: {type(e).__name__} — {e}")
 
-    log_cb("ERROR: Could not launch Chrome. Make sure Google Chrome is installed.")
+    log_cb("ERROR: Could not launch Chrome. Ensure Google Chrome is installed.")
     return None
-
-
-def _get_chrome_major_version() -> int | None:
-    """Read the installed Chrome major version so uc can download the right driver."""
-    import subprocess, re
-    paths = [
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-        r"C:\Users\%USERNAME%\AppData\Local\Google\Chrome\Application\chrome.exe",
-    ]
-    for path in paths:
-        try:
-            out = subprocess.check_output(
-                f'wmic datafile where name="{path.replace(chr(92), chr(92)*2)}" get Version /value',
-                shell=True, stderr=subprocess.DEVNULL
-            ).decode()
-            match = re.search(r"Version=(\d+)", out)
-            if match:
-                return int(match.group(1))
-        except Exception:
-            pass
-    return None  # let uc auto-detect
 
 
 def get_driver():
@@ -127,21 +156,29 @@ def get_driver():
 
 
 def launch_browser(log_cb: Callable[[str], None]) -> bool:
-    global _driver
+    global _driver, _launching
     if not SELENIUM_AVAILABLE:
         log_cb("ERROR: selenium / undetected-chromedriver not installed.")
+        return False
+    if _launching:
+        log_cb("Browser is already starting up — please wait...")
         return False
     with _driver_lock:
         if _driver is not None:
             log_cb("Browser already running.")
             return True
-        driver = _try_launch(log_cb)
-        if driver:
-            _driver = driver
-            _driver.get(LOGIN_URL)
-            log_cb("Browser launched. Please log in. Solve any captcha manually.")
-            return True
-        return False
+        _launching = True
+        try:
+            driver = _try_launch(log_cb)
+            if driver:
+                _driver = driver
+                _driver.get(LOGIN_URL)
+                log_cb("Browser ready. Please log in. Solve any captcha manually.")
+                return True
+            log_cb("ERROR: Browser failed to launch. Check the log for details.")
+            return False
+        finally:
+            _launching = False
 
 
 def fill_login(email: str, password: str, log_cb: Callable[[str], None]) -> bool:
