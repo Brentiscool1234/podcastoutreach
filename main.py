@@ -411,20 +411,31 @@ class App(ctk.CTk):
             name_label = ctk.CTkLabel(row_frame, text=pod["name"], font=ctk.CTkFont(weight="bold"), anchor="w")
             name_label.grid(row=0, column=0, sticky="w", padx=10, pady=(8, 2))
 
+            if pod.get("category"):
+                ctk.CTkLabel(row_frame, text=pod["category"], text_color="#5dade2", anchor="w").grid(
+                    row=1, column=0, sticky="w", padx=10, pady=(0, 1))
+
             if pod.get("description"):
-                desc_label = ctk.CTkLabel(row_frame, text=pod["description"][:180], text_color="gray",
-                                          anchor="w", wraplength=350)
-                desc_label.grid(row=1, column=0, sticky="w", padx=10, pady=(0, 2))
+                ctk.CTkLabel(row_frame, text=pod["description"][:180], text_color="gray",
+                             anchor="w", wraplength=360).grid(row=2, column=0, sticky="w", padx=10, pady=(0, 2))
 
             btn_frame = ctk.CTkFrame(row_frame, fg_color="transparent")
-            btn_frame.grid(row=2, column=0, sticky="w", padx=6, pady=(4, 8))
+            btn_frame.grid(row=3, column=0, sticky="w", padx=6, pady=(4, 8))
 
             if pod.get("link"):
                 ctk.CTkButton(btn_frame, text="Open Page", width=100,
                               command=lambda link=pod["link"]: self._open_podcast(link)).pack(side="left", padx=4)
 
             ctk.CTkButton(btn_frame, text="Copy Pitch", width=100,
-                          command=lambda: self._copy_pitch()).pack(side="left", padx=4)
+                          command=self._copy_pitch).pack(side="left", padx=4)
+
+            # Send Pitch button — the main automation action
+            send_btn = ctk.CTkButton(
+                btn_frame, text="Send Pitch", width=110,
+                fg_color="#1e8449", hover_color="#145a32",
+                command=lambda p=pod: self._send_pitch_to_podcast(p),
+            )
+            send_btn.pack(side="left", padx=4)
 
             self._podcast_rows.append(row_frame)
 
@@ -432,6 +443,65 @@ class App(ctk.CTk):
 
     def _open_podcast(self, link: str):
         browser.open_podcast(link, lambda msg: self.after(0, lambda m=msg: self._log(m)))
+
+    def _send_pitch_to_podcast(self, pod: dict):
+        pitch_text = self.t_pitch.get("0.0", "end").strip()
+        if not pitch_text:
+            messagebox.showwarning("No Pitch", "Go to the Pitch Creator tab and generate or write a pitch first.")
+            return
+        if not pod.get("link"):
+            messagebox.showwarning("No Link", f"No profile link found for '{pod['name']}'. Open their page manually.")
+            return
+
+        confirmed = messagebox.askyesno(
+            "Confirm Pitch Submission",
+            f"Send your pitch to:\n\n{pod['name']}\n\nThe app will:\n"
+            "1. Navigate to their podcast page\n"
+            "2. Click the Pitch/Apply button\n"
+            "3. Fill in your pitch text\n"
+            "4. Ask you to confirm before clicking Submit\n\n"
+            "Proceed?",
+        )
+        if not confirmed:
+            return
+
+        self.browser_status.configure(text="Browser: Sending pitch...", text_color="yellow")
+        self._log(f"Starting pitch send to: {pod['name']}")
+
+        # confirm_cb runs on the background thread but must show dialog on main thread
+        confirm_event = threading.Event()
+        confirm_result = [False]
+
+        def confirm_cb():
+            self.after(0, _ask_confirm)
+            confirm_event.wait(timeout=120)
+            return confirm_result[0]
+
+        def _ask_confirm():
+            result = messagebox.askyesno(
+                "Ready to Submit?",
+                "The pitch has been filled in.\n\n"
+                "• If a captcha appeared in the browser, solve it first.\n"
+                "• Check the form looks correct.\n\n"
+                "Click YES to submit, NO to cancel.",
+            )
+            confirm_result[0] = result
+            confirm_event.set()
+
+        def run():
+            ok = browser.send_pitch(
+                link=pod["link"],
+                pitch_text=pitch_text,
+                confirm_cb=confirm_cb,
+                log_cb=lambda msg: self.after(0, lambda m=msg: self._log(m)),
+            )
+            status = "Browser: Running" if ok else "Browser: Running (pitch not sent)"
+            color = "green" if ok else "orange"
+            self.after(0, lambda: self.browser_status.configure(text=status, text_color=color))
+            if ok:
+                self.after(0, lambda: self._log(f"Pitch sent to {pod['name']} successfully."))
+
+        threading.Thread(target=run, daemon=True).start()
 
     # ─── Log helpers ───────────────────────────────────────────────────────────
 
