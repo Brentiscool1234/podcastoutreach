@@ -242,9 +242,20 @@ def _scrape_listings(log_cb: Callable[[str], None]) -> list:
                 except Exception:
                     pass
 
+                # Try to find a host name separate from the podcast name
+                host_name = ""
+                for host_sel in ["[class*='host']", "[class*='author']", "[class*='presenter']", "[class*='by']"]:
+                    try:
+                        host_name = card.find_element(By.CSS_SELECTOR, host_sel).text.strip()
+                        if host_name:
+                            break
+                    except Exception:
+                        pass
+
                 if name:
                     results.append({
                         "name": name,
+                        "host_name": host_name or name,
                         "description": desc[:200],
                         "category": category,
                         "link": link,

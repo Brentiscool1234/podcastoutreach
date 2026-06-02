@@ -453,8 +453,13 @@ class App(ctk.CTk):
             messagebox.showwarning("No Link", f"No profile link found for '{pod['name']}'. Open their page manually.")
             return
 
+        # Replace common host name placeholders with the podcast/host name
+        host_name = pod.get("host_name") or pod.get("name", "")
+        for placeholder in ["[Host's Name]", "[Host Name]", "[host's name]", "[host name]", "[Podcast Host]"]:
+            pitch_text = pitch_text.replace(placeholder, host_name)
+
         self.browser_status.configure(text="Browser: Sending pitch...", text_color="yellow")
-        self._log(f"Starting pitch send to: {pod['name']}")
+        self._log(f"Starting pitch send to: {pod['name']} (host name filled: {host_name})")
 
         # Single approval: shown after the form is filled so the user can
         # check the form and solve any captcha before confirming submission.
