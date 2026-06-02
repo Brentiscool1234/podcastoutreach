@@ -4,6 +4,8 @@ from typing import Callable, Optional
 
 try:
     import undetected_chromedriver as uc
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service as ChromeService
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
@@ -12,9 +14,15 @@ try:
         NoSuchElementException,
         WebDriverException,
     )
+    try:
+        from webdriver_manager.chrome import ChromeDriverManager
+        WDM_AVAILABLE = True
+    except ImportError:
+        WDM_AVAILABLE = False
     SELENIUM_AVAILABLE = True
 except ImportError:
     SELENIUM_AVAILABLE = False
+    WDM_AVAILABLE = False
 
 LOGIN_URL = "https://www.matchmaker.fm/login"
 BROWSE_URL = "https://www.matchmaker.fm/search"
@@ -61,6 +69,59 @@ def is_available() -> bool:
     return SELENIUM_AVAILABLE
 
 
+def _try_launch(log_cb: Callable[[str], None]):
+    """Try undetected_chromedriver first, fall back to selenium + webdriver-manager."""
+    # Attempt 1: undetected_chromedriver (best for avoiding bot detection)
+    try:
+        log_cb("Launching Chrome (undetected mode)...")
+        options = uc.ChromeOptions()
+        options.add_argument("--start-maximized")
+        driver = uc.Chrome(options=options, version_main=_get_chrome_major_version())
+        return driver
+    except Exception as e:
+        log_cb(f"Undetected driver failed ({e}), trying standard driver...")
+
+    # Attempt 2: standard selenium + webdriver-manager (auto-downloads matching driver)
+    if WDM_AVAILABLE:
+        try:
+            log_cb("Launching Chrome (standard mode)...")
+            options = webdriver.ChromeOptions()
+            options.add_argument("--start-maximized")
+            options.add_argument("--disable-blink-features=AutomationControlled")
+            options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            options.add_experimental_option("useAutomationExtension", False)
+            service = ChromeService(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=options)
+            return driver
+        except Exception as e:
+            log_cb(f"Standard driver also failed: {e}")
+
+    log_cb("ERROR: Could not launch Chrome. Make sure Google Chrome is installed.")
+    return None
+
+
+def _get_chrome_major_version() -> int | None:
+    """Read the installed Chrome major version so uc can download the right driver."""
+    import subprocess, re
+    paths = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"C:\Users\%USERNAME%\AppData\Local\Google\Chrome\Application\chrome.exe",
+    ]
+    for path in paths:
+        try:
+            out = subprocess.check_output(
+                f'wmic datafile where name="{path.replace(chr(92), chr(92)*2)}" get Version /value',
+                shell=True, stderr=subprocess.DEVNULL
+            ).decode()
+            match = re.search(r"Version=(\d+)", out)
+            if match:
+                return int(match.group(1))
+        except Exception:
+            pass
+    return None  # let uc auto-detect
+
+
 def get_driver():
     return _driver
 
@@ -74,18 +135,13 @@ def launch_browser(log_cb: Callable[[str], None]) -> bool:
         if _driver is not None:
             log_cb("Browser already running.")
             return True
-        try:
-            log_cb("Launching Chrome browser...")
-            options = uc.ChromeOptions()
-            options.add_argument("--start-maximized")
-            driver = uc.Chrome(options=options)
-            driver.get(LOGIN_URL)
+        driver = _try_launch(log_cb)
+        if driver:
             _driver = driver
+            _driver.get(LOGIN_URL)
             log_cb("Browser launched. Please log in. Solve any captcha manually.")
             return True
-        except Exception as e:
-            log_cb(f"ERROR launching browser: {e}")
-            return False
+        return False
 
 
 def fill_login(email: str, password: str, log_cb: Callable[[str], None]) -> bool:
