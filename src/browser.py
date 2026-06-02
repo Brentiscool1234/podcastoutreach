@@ -122,29 +122,29 @@ def _try_launch(log_cb: Callable[[str], None]):
     version = _get_chrome_major_version()
     log_cb(f"Detected Chrome version: {version}" if version else "Chrome version not detected — using auto-detect.")
 
-    def _base_options(cls):
-        opts = cls()
-        opts.add_argument("--start-maximized")
-        return opts
-
     def _stealth_options():
-        opts = _base_options(webdriver.ChromeOptions)
+        opts = webdriver.ChromeOptions()
+        opts.add_argument("--start-maximized")
         opts.add_argument("--disable-blink-features=AutomationControlled")
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
         opts.add_experimental_option("useAutomationExtension", False)
         return opts
 
-    # Attempt 1: undetected_chromedriver
+    # Attempt 1: correct chromedriver from Google's Chrome for Testing API.
+    # This always has the right win64 binary for any Chrome version including new ones.
     try:
-        log_cb("Attempt 1: undetected_chromedriver...")
-        driver = uc.Chrome(options=_base_options(uc.ChromeOptions), version_main=version)
-        log_cb("Chrome launched (undetected mode).")
-        return driver
+        log_cb("Attempt 1: fetching correct ChromeDriver from Google...")
+        driver_path = _download_chromedriver_for_testing(version, log_cb)
+        if driver_path:
+            service = ChromeService(driver_path)
+            driver = webdriver.Chrome(service=service, options=_stealth_options())
+            log_cb("Chrome launched successfully.")
+            return driver
     except Exception as e:
-        log_cb(f"Attempt 1 failed: {type(e).__name__}")
+        log_cb(f"Attempt 1 failed: {type(e).__name__} — {e}")
+        _kill_orphan_chrome()
 
-    # Attempt 2: Selenium built-in driver manager (selenium >= 4.6, no extra library)
-    # selenium-manager auto-downloads the correct 64-bit chromedriver for your Chrome.
+    # Attempt 2: Selenium built-in driver manager
     try:
         log_cb("Attempt 2: Selenium built-in driver manager...")
         driver = webdriver.Chrome(options=_stealth_options())
@@ -152,21 +152,33 @@ def _try_launch(log_cb: Callable[[str], None]):
         return driver
     except Exception as e:
         log_cb(f"Attempt 2 failed: {type(e).__name__}")
+        _kill_orphan_chrome()
 
-    # Attempt 3: download ChromeDriver directly from Chrome for Testing API
+    # Attempt 3: undetected_chromedriver
     try:
-        log_cb("Attempt 3: downloading ChromeDriver from Google (Chrome for Testing)...")
-        driver_path = _download_chromedriver_for_testing(version, log_cb)
-        if driver_path:
-            service = ChromeService(driver_path)
-            driver = webdriver.Chrome(service=service, options=_stealth_options())
-            log_cb("Chrome launched (Chrome for Testing driver).")
-            return driver
+        log_cb("Attempt 3: undetected_chromedriver...")
+        opts = uc.ChromeOptions()
+        opts.add_argument("--start-maximized")
+        driver = uc.Chrome(options=opts, version_main=version)
+        log_cb("Chrome launched (undetected mode).")
+        return driver
     except Exception as e:
-        log_cb(f"Attempt 3 failed: {type(e).__name__} — {e}")
+        log_cb(f"Attempt 3 failed: {type(e).__name__}")
 
     log_cb("ERROR: All launch attempts failed. Make sure Google Chrome is installed and up to date.")
     return None
+
+
+def _kill_orphan_chrome():
+    """Kill any Chrome processes left open by a failed driver launch."""
+    try:
+        import subprocess
+        subprocess.run(
+            ["taskkill", "/F", "/IM", "chrome.exe", "/T"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+    except Exception:
+        pass
 
 
 def _download_chromedriver_for_testing(version: Optional[int], log_cb: Callable[[str], None]) -> Optional[str]:
