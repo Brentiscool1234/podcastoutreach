@@ -1,5 +1,9 @@
 import time
 import threading
+import os
+import zipfile
+import urllib.request
+import json
 from typing import Callable, Optional
 
 try:
@@ -149,21 +153,78 @@ def _try_launch(log_cb: Callable[[str], None]):
     except Exception as e:
         log_cb(f"Attempt 2 failed: {type(e).__name__}")
 
-    # Attempt 3: webdriver-manager with explicit win64 platform
-    if WDM_AVAILABLE:
-        try:
-            log_cb("Attempt 3: webdriver-manager (win64)...")
-            from webdriver_manager.core.os_manager import ChromeType
-            mgr = ChromeDriverManager()
-            driver_path = mgr.install()
+    # Attempt 3: download ChromeDriver directly from Chrome for Testing API
+    try:
+        log_cb("Attempt 3: downloading ChromeDriver from Google (Chrome for Testing)...")
+        driver_path = _download_chromedriver_for_testing(version, log_cb)
+        if driver_path:
             service = ChromeService(driver_path)
             driver = webdriver.Chrome(service=service, options=_stealth_options())
-            log_cb("Chrome launched (webdriver-manager).")
+            log_cb("Chrome launched (Chrome for Testing driver).")
             return driver
-        except Exception as e:
-            log_cb(f"Attempt 3 failed: {type(e).__name__} — {e}")
+    except Exception as e:
+        log_cb(f"Attempt 3 failed: {type(e).__name__} — {e}")
 
     log_cb("ERROR: All launch attempts failed. Make sure Google Chrome is installed and up to date.")
+    return None
+
+
+def _download_chromedriver_for_testing(version: Optional[int], log_cb: Callable[[str], None]) -> Optional[str]:
+    """Download the matching win64 ChromeDriver from Google's Chrome for Testing API."""
+    cache_dir = os.path.join(os.path.expanduser("~"), ".chromedriver_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    # Check cached driver first
+    if version:
+        cached = os.path.join(cache_dir, f"chromedriver_{version}.exe")
+        if os.path.exists(cached):
+            log_cb(f"Using cached ChromeDriver for version {version}.")
+            return cached
+
+    # Fetch the known-good versions JSON from Google
+    log_cb("Fetching ChromeDriver version list from Google...")
+    url = "https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json"
+    with urllib.request.urlopen(url, timeout=15) as r:
+        data = json.loads(r.read())
+
+    # Find the newest entry matching our major version
+    download_url = None
+    matched_version = None
+    for entry in reversed(data.get("versions", [])):
+        v = entry.get("version", "")
+        major = int(v.split(".")[0]) if v else 0
+        if version is None or major == version:
+            drivers = entry.get("downloads", {}).get("chromedriver", [])
+            for d in drivers:
+                if d.get("platform") == "win64":
+                    download_url = d["url"]
+                    matched_version = v
+                    break
+        if download_url:
+            break
+
+    if not download_url:
+        log_cb(f"No ChromeDriver found for Chrome {version} in Google's list.")
+        return None
+
+    log_cb(f"Downloading ChromeDriver {matched_version} (win64)...")
+    zip_path = os.path.join(cache_dir, "chromedriver_win64.zip")
+    urllib.request.urlretrieve(download_url, zip_path)
+
+    log_cb("Extracting ChromeDriver...")
+    with zipfile.ZipFile(zip_path, "r") as z:
+        for name in z.namelist():
+            if name.endswith("chromedriver.exe"):
+                # Extract just the exe, rename to versioned name
+                data = z.read(name)
+                out_name = f"chromedriver_{version or 'latest'}.exe"
+                out_path = os.path.join(cache_dir, out_name)
+                with open(out_path, "wb") as f:
+                    f.write(data)
+                log_cb(f"ChromeDriver saved to {out_path}")
+                return out_path
+
+    log_cb("Could not find chromedriver.exe inside the downloaded zip.")
     return None
 
 
